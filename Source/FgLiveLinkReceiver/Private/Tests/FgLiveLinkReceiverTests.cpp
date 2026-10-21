@@ -6,6 +6,7 @@
 
 #include "Containers/StringConv.h"
 #include "JSONDatagramReassembler.h"
+#include "JSONFrameRateEstimator.h"
 #include "JSONLiveLinkSource.h"
 
 namespace
@@ -304,6 +305,55 @@ bool FFgLiveLinkFrameOrderTest::RunTest(const FString& Parameters)
 		TEXT("Out-of-order older frame does not move animation backwards"),
 		FJSONLiveLinkSource::ShouldAcceptSubjectFrame(9, LastAcceptedFrameId));
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFgLiveLinkFrameRateEstimatorTest,
+	"FgLiveLinkReceiver.Frames.EstimatesArrivalFrameRate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFgLiveLinkFrameRateEstimatorTest::RunTest(const FString& Parameters)
+{
+	FJSONFrameRateEstimator Estimator;
+	for (int32 FrameIndex = 0; FrameIndex <= 30; ++FrameIndex)
+	{
+		Estimator.AddFrame(FrameIndex, static_cast<double>(FrameIndex) / 30.0);
+	}
+
+	TestTrue(TEXT("Estimator produces an estimated frame rate"), Estimator.HasEstimate());
+	TestTrue(
+		TEXT("Estimated frame rate is near 30 fps"),
+		FMath::IsNearlyEqual(Estimator.GetFramesPerSecond(), 30.0, 0.5));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFgLiveLinkFrameRateEstimatorResetTest,
+	"FgLiveLinkReceiver.Frames.ResetsFrameRateAfterFrameIdRestart",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFgLiveLinkFrameRateEstimatorResetTest::RunTest(const FString& Parameters)
+{
+	FJSONFrameRateEstimator Estimator;
+	for (int32 FrameIndex = 10000; FrameIndex <= 10030; ++FrameIndex)
+	{
+		Estimator.AddFrame(FrameIndex, static_cast<double>(FrameIndex - 10000) / 30.0);
+	}
+
+	TestTrue(TEXT("Initial estimate exists"), Estimator.HasEstimate());
+	Estimator.AddFrame(0, 2.0);
+	TestFalse(TEXT("Large FrameId backwards jump clears the estimate"), Estimator.HasEstimate());
+
+	for (int32 FrameIndex = 1; FrameIndex <= 30; ++FrameIndex)
+	{
+		Estimator.AddFrame(FrameIndex, 2.0 + static_cast<double>(FrameIndex) / 60.0);
+	}
+
+	TestTrue(TEXT("Estimator recovers after restart"), Estimator.HasEstimate());
+	TestTrue(
+		TEXT("Recovered estimate is near 60 fps"),
+		FMath::IsNearlyEqual(Estimator.GetFramesPerSecond(), 60.0, 0.5));
 	return true;
 }
 

@@ -11,6 +11,7 @@
 class FRunnableThread;
 class FSocket;
 class FJSONDatagramReassembler;
+class FJSONFrameRateEstimator;
 class ILiveLinkClient;
 class ISocketSubsystem;
 
@@ -103,6 +104,9 @@ private:
 
 	// Last accepted frame for each subject, used to suppress duplicate/stale frames
 	TMap<FName, int32> LastSubjectFrameIds;
+
+	// Estimates the effective source frame rate from FrameId and arrival time
+	TMap<FName, TUniquePtr<FJSONFrameRateEstimator>> SubjectFrameRateEstimators;
 
 	// Reassembles application-level split or concatenated JSON payloads
 	TUniquePtr<FJSONDatagramReassembler> DatagramReassembler;

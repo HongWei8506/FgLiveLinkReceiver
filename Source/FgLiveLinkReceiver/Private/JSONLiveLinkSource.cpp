@@ -3,6 +3,7 @@
 #include "JSONLiveLinkSource.h"
 
 #include "JSONDatagramReassembler.h"
+#include "JSONFrameRateEstimator.h"
 #include "ILiveLinkClient.h"
 #include "LiveLinkTypes.h"
 #include "Async/Async.h"
@@ -126,6 +127,7 @@ bool FJSONLiveLinkSource::RequestSourceShutdown()
 		DatagramReassembler->Reset();
 	}
 	LastSubjectFrameIds.Reset();
+	SubjectFrameRateEstimators.Reset();
 
 	return true;
 }
@@ -387,6 +389,20 @@ void FJSONLiveLinkSource::HandleReceivedData(const uint8* Data, int32 NumBytes)
 			continue;
 		}
 
+		FFrameRate SceneFrameRate(60, 1);
+		if (FrameId != INDEX_NONE)
+		{
+			TUniquePtr<FJSONFrameRateEstimator>& FrameRateEstimator =
+				SubjectFrameRateEstimators.FindOrAdd(SubjectName);
+			if (!FrameRateEstimator.IsValid())
+			{
+				FrameRateEstimator = MakeUnique<FJSONFrameRateEstimator>();
+			}
+
+			FrameRateEstimator->AddFrame(FrameId, FPlatformTime::Seconds());
+			SceneFrameRate = FrameRateEstimator->GetFrameRate();
+		}
+
 		const TArray<FName>* ExistingPropertyNames = SubjectPropertyNames.Find(SubjectName);
 		if (ExistingPropertyNames == nullptr || *ExistingPropertyNames != PropertyNames)
 		{
@@ -417,6 +433,7 @@ void FJSONLiveLinkSource::HandleReceivedData(const uint8* Data, int32 NumBytes)
 		FrameData.PropertyValues = PropertyValues;
 		FrameData.FrameId = FrameId;
 		FrameData.MetaData.SceneTime.Time.FrameNumber = FrameData.FrameId;
+		FrameData.MetaData.SceneTime.Rate = SceneFrameRate;
 
 		Client->PushSubjectFrameData_AnyThread(
 			{ SourceGuid, SubjectName },
