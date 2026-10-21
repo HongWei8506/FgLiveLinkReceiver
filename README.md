@@ -5,6 +5,9 @@ This is an example of how a LiveLink plugin can be implemented inside UE4. The p
 
 See https://docs.unrealengine.com/en-US/Engine/Animation/LiveLinkPlugin/index.html for more information about UE4 LiveLink.
 
+See [docs/LIVELINK_BEHAVIOR.md](docs/LIVELINK_BEHAVIOR.md) for UE 5.8
+LiveLinkHub, MetaHuman, frame-rate estimation, and protocol behavior.
+
 
 ![image](https://github.com/FACEGOOD/FgLiveLinkReciever/assets/11623487/117eb88a-8604-48d3-8480-aa4c18f79d2f)
 

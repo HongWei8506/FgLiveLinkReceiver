@@ -325,6 +325,14 @@ bool FFgLiveLinkFrameRateEstimatorTest::RunTest(const FString& Parameters)
 	TestTrue(
 		TEXT("Estimated frame rate is near 30 fps"),
 		FMath::IsNearlyEqual(Estimator.GetFramesPerSecond(), 30.0, 0.5));
+	TestEqual(
+		TEXT("Scene time uses the stable nominal frame-rate numerator"),
+		Estimator.GetSceneFrameRate().Numerator,
+		30);
+	TestEqual(
+		TEXT("Scene time uses the stable nominal frame-rate denominator"),
+		Estimator.GetSceneFrameRate().Denominator,
+		1);
 	return true;
 }
 

@@ -85,10 +85,7 @@ double FJSONFrameRateEstimator::GetFramesPerSecond() const
 	return FMath::Clamp(EstimatedFramesPerSecond, 1.0, 240.0);
 }
 
-FFrameRate FJSONFrameRateEstimator::GetFrameRate() const
+FFrameRate FJSONFrameRateEstimator::GetSceneFrameRate() const
 {
-	const double FramesPerSecond = GetFramesPerSecond();
-	return FFrameRate(
-		static_cast<uint32>(FMath::RoundToInt(FramesPerSecond * 100.0)),
-		100u);
+	return FFrameRate(NominalSceneFramesPerSecond, 1);
 }

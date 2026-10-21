@@ -16,6 +16,7 @@ public:
 	static constexpr int32 MinimumSamplesPerWindow = 6;
 	static constexpr double MinimumWindowSeconds = 0.2;
 	static constexpr int32 RestartBackwardFrameThreshold = 600;
+	static constexpr int32 NominalSceneFramesPerSecond = 30;
 
 	void Reset();
 
@@ -27,7 +28,7 @@ public:
 
 	double GetFramesPerSecond() const;
 
-	FFrameRate GetFrameRate() const;
+	FFrameRate GetSceneFrameRate() const;
 
 private:
 	int32 WindowStartFrameId = INDEX_NONE;

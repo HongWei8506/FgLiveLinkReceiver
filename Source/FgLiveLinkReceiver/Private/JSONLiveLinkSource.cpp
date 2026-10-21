@@ -389,7 +389,8 @@ void FJSONLiveLinkSource::HandleReceivedData(const uint8* Data, int32 NumBytes)
 			continue;
 		}
 
-		FFrameRate SceneFrameRate(60, 1);
+		FFrameRate SceneFrameRate(FJSONFrameRateEstimator::NominalSceneFramesPerSecond, 1);
+		double EstimatedSourceFramesPerSecond = 0.0;
 		if (FrameId != INDEX_NONE)
 		{
 			TUniquePtr<FJSONFrameRateEstimator>& FrameRateEstimator =
@@ -400,7 +401,8 @@ void FJSONLiveLinkSource::HandleReceivedData(const uint8* Data, int32 NumBytes)
 			}
 
 			FrameRateEstimator->AddFrame(FrameId, FPlatformTime::Seconds());
-			SceneFrameRate = FrameRateEstimator->GetFrameRate();
+			EstimatedSourceFramesPerSecond = FrameRateEstimator->GetFramesPerSecond();
+			SceneFrameRate = FrameRateEstimator->GetSceneFrameRate();
 		}
 
 		const TArray<FName>* ExistingPropertyNames = SubjectPropertyNames.Find(SubjectName);
@@ -434,6 +436,18 @@ void FJSONLiveLinkSource::HandleReceivedData(const uint8* Data, int32 NumBytes)
 		FrameData.FrameId = FrameId;
 		FrameData.MetaData.SceneTime.Time.FrameNumber = FrameData.FrameId;
 		FrameData.MetaData.SceneTime.Rate = SceneFrameRate;
+		if (EstimatedSourceFramesPerSecond > 0.0)
+		{
+			FrameData.MetaData.StringMetaData.Add(
+				FName(TEXT("EstimatedSourceFPS")),
+				FString::Printf(TEXT("%.3f"), EstimatedSourceFramesPerSecond));
+		}
+		FrameData.MetaData.StringMetaData.Add(
+			FName(TEXT("SceneTimeFrameRate")),
+			FString::Printf(
+				TEXT("%d/%d"),
+				SceneFrameRate.Numerator,
+				SceneFrameRate.Denominator));
 
 		Client->PushSubjectFrameData_AnyThread(
 			{ SourceGuid, SubjectName },
