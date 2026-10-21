@@ -13,7 +13,6 @@ public class FgLiveLinkReceiver : ModuleRules
 			{
 				"Core",
 				"LiveLinkInterface",
-				"Messaging",
 			});
 
 		PrivateDependencyModuleNames.AddRange(

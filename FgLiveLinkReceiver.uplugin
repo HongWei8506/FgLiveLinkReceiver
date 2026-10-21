@@ -3,21 +3,27 @@
 	"Version": 2,
 	"VersionName": "2.0",
 	"FriendlyName": "FgLiveLinkReceiver",
-	"Description": "LiveLink Source for receiving JSON over sockets",
-	"Category": "FaceGood",
-	"CreatedBy": "FaceGood, Inc.",
-	"CreatedByURL": "http://Avatary.com",
+	"Description": "FACEGOOD LiveLink Source for receiving JSON over sockets",
+	"Category": "FACEGOOD",
+	"CreatedBy": "FACEGOOD, Inc.",
+	"CreatedByURL": "https://www.facegood.ca",
 	"DocsURL": "https://github.com/FACEGOOD/FgLiveLinkReceiver",
 	"MarketplaceURL": "",
-	"SupportURL": "",
-	"EngineVersion": "5.5.0",
+	"SupportURL": "https://www.facegood.ca",
+	"EngineVersion": "5.8.0",
 	"CanContainContent": true,
 	"Installed": true,
+	"SupportedPrograms": [
+		"LiveLinkHub"
+	],
 	"Modules": [
 		{
 			"Name": "FgLiveLinkReceiver",
 			"Type": "Runtime",
 			"LoadingPhase": "Default",
+			"ProgramAllowList": [
+				"LiveLinkHub"
+			],
 			"PlatformAllowList": [
 				"Win64"
 			]

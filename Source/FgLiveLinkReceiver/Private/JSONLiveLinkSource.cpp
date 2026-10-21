@@ -2,29 +2,37 @@
 
 #include "JSONLiveLinkSource.h"
 
+#include "JSONDatagramReassembler.h"
 #include "ILiveLinkClient.h"
 #include "LiveLinkTypes.h"
-#include "Roles/LiveLinkAnimationRole.h"
-#include "Roles/LiveLinkAnimationTypes.h"
 #include "Async/Async.h"
 #include "Common/UdpSocketBuilder.h"
+#include "Containers/StringConv.h"
+#include "HAL/PlatformTime.h"
 #include "HAL/RunnableThread.h"
+#include "HAL/PlatformTLS.h"
 #include "Json.h"
+#include "Roles/LiveLinkBasicRole.h"
+#include "Roles/LiveLinkBasicTypes.h"
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 
 #define LOCTEXT_NAMESPACE "JSONLiveLinkSource"
 
 #define RECV_BUFFER_SIZE 1024 * 1024
+#define SOCKET_RECEIVE_BUFFER_SIZE 4 * 1024 * 1024
 
 FJSONLiveLinkSource::FJSONLiveLinkSource(FIPv4Endpoint InEndpoint)
-	: Socket(nullptr)
+	: Client(nullptr)
+	, Socket(nullptr)
+	, SocketSubsystem(nullptr)
 	, Stopping(false)
 	, Thread(nullptr)
 	, WaitTime(FTimespan::FromMilliseconds(100))
 {
 	// defaults
 	DeviceEndpoint = InEndpoint;
+	DatagramReassembler = MakeUnique<FJSONDatagramReassembler>();
 
 	SourceStatus = LOCTEXT("SourceStatus_DeviceNotFound", "Device Not Found");
 	SourceType = LOCTEXT("JSONLiveLinkSourceType", "FaceGoodAnimSource");
@@ -37,7 +45,7 @@ FJSONLiveLinkSource::FJSONLiveLinkSource(FIPv4Endpoint InEndpoint)
 			.AsNonBlocking()
 			.AsReusable()
 			.BoundToPort(DeviceEndpoint.Port)
-			.WithReceiveBufferSize(RECV_BUFFER_SIZE)
+			.WithReceiveBufferSize(SOCKET_RECEIVE_BUFFER_SIZE)
 
 			.BoundToAddress(FIPv4Address::Any)
 			.JoinedToGroup(DeviceEndpoint.Address)
@@ -52,7 +60,7 @@ FJSONLiveLinkSource::FJSONLiveLinkSource(FIPv4Endpoint InEndpoint)
 			.AsReusable()
 			.BoundToAddress(DeviceEndpoint.Address)
 			.BoundToPort(DeviceEndpoint.Port)
-			.WithReceiveBufferSize(RECV_BUFFER_SIZE);
+			.WithReceiveBufferSize(SOCKET_RECEIVE_BUFFER_SIZE);
 	}
 
 	RecvBuffer.SetNumUninitialized(RECV_BUFFER_SIZE);
@@ -60,10 +68,7 @@ FJSONLiveLinkSource::FJSONLiveLinkSource(FIPv4Endpoint InEndpoint)
 	if ((Socket != nullptr) && (Socket->GetSocketType() == SOCKTYPE_Datagram))
 	{
 		SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
-
-		Start();
-
-		SourceStatus = LOCTEXT("SourceStatus_Receiving", "Receiving");
+		SourceStatus = LOCTEXT("SourceStatus_WaitingForClient", "Waiting for Live Link Client");
 	}
 }
 
@@ -79,7 +84,10 @@ FJSONLiveLinkSource::~FJSONLiveLinkSource()
 	if (Socket != nullptr)
 	{
 		Socket->Close();
-		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Socket);
+		if (SocketSubsystem != nullptr)
+		{
+			SocketSubsystem->DestroySocket(Socket);
+		}
 	}
 }
 
@@ -87,6 +95,12 @@ void FJSONLiveLinkSource::ReceiveClient(ILiveLinkClient* InClient, FGuid InSourc
 {
 	Client = InClient;
 	SourceGuid = InSourceGuid;
+
+	if (Client != nullptr && Socket != nullptr && Thread == nullptr)
+	{
+		Start();
+		SourceStatus = LOCTEXT("SourceStatus_Receiving", "Receiving");
+	}
 }
 
 
@@ -102,12 +116,28 @@ bool FJSONLiveLinkSource::RequestSourceShutdown()
 {
 	Stop();
 
+	if (Thread != nullptr && Thread->GetThreadID() != FPlatformTLS::GetCurrentThreadId())
+	{
+		Thread->WaitForCompletion();
+	}
+
+	if (DatagramReassembler.IsValid())
+	{
+		DatagramReassembler->Reset();
+	}
+	LastSubjectFrameIds.Reset();
+
 	return true;
 }
 // FRunnable interface
 
 void FJSONLiveLinkSource::Start()
 {
+	if (Thread != nullptr || Socket == nullptr)
+	{
+		return;
+	}
+
 	ThreadName = "JSON UDP Receiver ";
 	ThreadName.AppendInt(FAsyncThreadIndex::GetNext());
 
@@ -121,7 +151,13 @@ void FJSONLiveLinkSource::Stop()
 
 uint32 FJSONLiveLinkSource::Run()
 {
+	if (Socket == nullptr || SocketSubsystem == nullptr)
+	{
+		return 1;
+	}
+
 	TSharedRef<FInternetAddr> Sender = SocketSubsystem->CreateInternetAddr();
+	TArray<TArray<uint8>> CompleteMessages;
 
 	while (!Stopping)
 	{
@@ -137,10 +173,27 @@ uint32 FJSONLiveLinkSource::Run()
 				{
 					if (Read > 0)
 					{
-						TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> ReceivedData = MakeShareable(new TArray<uint8>());
-						ReceivedData->SetNumUninitialized(Read);
-						memcpy(ReceivedData->GetData(), RecvBuffer.GetData(), Read);
-						AsyncTask(ENamedThreads::GameThread, [this, ReceivedData]() { HandleReceivedData(ReceivedData); });
+						CompleteMessages.Reset();
+						if (DatagramReassembler.IsValid())
+						{
+							DatagramReassembler->AddPacket(
+								Sender->ToString(true),
+								RecvBuffer.GetData(),
+								Read,
+								FPlatformTime::Seconds(),
+								CompleteMessages);
+
+							for (const TArray<uint8>& CompleteMessage : CompleteMessages)
+							{
+								HandleReceivedData(
+									CompleteMessage.GetData(),
+									CompleteMessage.Num());
+							}
+						}
+						else
+						{
+							HandleReceivedData(RecvBuffer.GetData(), Read);
+						}
 					}
 				}
 			}
@@ -149,122 +202,225 @@ uint32 FJSONLiveLinkSource::Run()
 	return 0;
 }
 
-void FJSONLiveLinkSource::HandleReceivedData(TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> ReceivedData)
+void FJSONLiveLinkSource::BuildMetaHumanPropertySet(
+	const TArray<TPair<FName, float>>& InputProperties,
+	TArray<FName>& OutPropertyNames,
+	TArray<float>& OutPropertyValues)
 {
-	FString JsonString;
-	JsonString.Empty(ReceivedData->Num());
-	for (uint8& Byte : *ReceivedData.Get())
+	OutPropertyNames.Reset();
+	OutPropertyValues.Reset();
+
+	TSet<FName> SeenPropertyNames;
+	auto AddProperty = [&OutPropertyNames, &OutPropertyValues, &SeenPropertyNames](
+		const FName PropertyName,
+		const float PropertyValue)
 	{
-		JsonString += TCHAR(Byte);
+		if (PropertyName.IsNone() || SeenPropertyNames.Contains(PropertyName))
+		{
+			return;
+		}
+
+		SeenPropertyNames.Add(PropertyName);
+		OutPropertyNames.Add(PropertyName);
+		OutPropertyValues.Add(PropertyValue);
+	};
+
+	for (const TPair<FName, float>& InputProperty : InputProperties)
+	{
+		AddProperty(InputProperty.Key, InputProperty.Value);
+
+		const FString PropertyName = InputProperty.Key.ToString();
+		FString BaseName;
+		FString ComponentName;
+		if (!PropertyName.Split(TEXT("."), &BaseName, &ComponentName))
+		{
+			const bool bCanUseDefaultYChannel =
+				PropertyName.StartsWith(TEXT("CTRL_"), ESearchCase::CaseSensitive)
+				&& !PropertyName.StartsWith(TEXT("CTRL_expressions_"), ESearchCase::CaseSensitive)
+				&& !PropertyName.StartsWith(TEXT("CTRL_rigLogic_"), ESearchCase::CaseSensitive);
+			if (bCanUseDefaultYChannel)
+			{
+				AddProperty(FName(*FString::Printf(TEXT("%s.ty"), *PropertyName)), InputProperty.Value);
+			}
+			continue;
+		}
+
+		FString MetaHumanComponentName;
+		if (ComponentName.Equals(TEXT("translateX"), ESearchCase::IgnoreCase))
+		{
+			MetaHumanComponentName = TEXT("tx");
+		}
+		else if (ComponentName.Equals(TEXT("translateY"), ESearchCase::IgnoreCase))
+		{
+			MetaHumanComponentName = TEXT("ty");
+		}
+		else if (ComponentName.Equals(TEXT("translateZ"), ESearchCase::IgnoreCase))
+		{
+			MetaHumanComponentName = TEXT("tz");
+		}
+
+		if (!MetaHumanComponentName.IsEmpty())
+		{
+			AddProperty(
+				FName(*FString::Printf(TEXT("%s.%s"), *BaseName, *MetaHumanComponentName)),
+				InputProperty.Value);
+		}
 	}
 
+	// MetaHuman's Basic LiveLink consumers expect these bookkeeping properties.
+	// Explicit values from the sender take precedence over these defaults.
+	AddProperty(FName(TEXT("HeadControlSwitch")), 0.0f);
+	AddProperty(FName(TEXT("HeadRoll")), 0.0f);
+	AddProperty(FName(TEXT("HeadPitch")), 0.0f);
+	AddProperty(FName(TEXT("HeadYaw")), 0.0f);
+	AddProperty(FName(TEXT("HeadTranslationX")), 0.0f);
+	AddProperty(FName(TEXT("HeadTranslationY")), 0.0f);
+	AddProperty(FName(TEXT("HeadTranslationZ")), 0.0f);
+	AddProperty(FName(TEXT("MHFDSVersion")), 1.0f);
+	AddProperty(FName(TEXT("DisableFaceOverride")), 1.0f);
+}
+
+bool FJSONLiveLinkSource::ShouldAcceptSubjectFrame(
+	const int32 FrameId,
+	int32& InOutLastAcceptedFrameId)
+{
+	if (FrameId == INDEX_NONE)
+	{
+		return true;
+	}
+
+	if (InOutLastAcceptedFrameId == INDEX_NONE || FrameId > InOutLastAcceptedFrameId)
+	{
+		InOutLastAcceptedFrameId = FrameId;
+		return true;
+	}
+
+	// A large backwards jump is treated as a sender restart. Small backwards
+	// jumps are stale datagrams and must not move the animation backwards.
+	constexpr int32 MaxOutOfOrderBackwardsFrames = 600;
+	if (InOutLastAcceptedFrameId - FrameId > MaxOutOfOrderBackwardsFrames)
+	{
+		InOutLastAcceptedFrameId = FrameId;
+		return true;
+	}
+
+	return false;
+}
+
+void FJSONLiveLinkSource::HandleReceivedData(const uint8* Data, int32 NumBytes)
+{
+	if (Client == nullptr || Data == nullptr || NumBytes <= 0)
+	{
+		return;
+	}
+
+	const FUTF8ToTCHAR Converter(reinterpret_cast<const ANSICHAR*>(Data), NumBytes);
+	const FString JsonString(Converter.Length(), Converter.Get());
 
 	TSharedPtr<FJsonObject> JsonObject;
-	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
-
-	if (FJsonSerializer::Deserialize(Reader, JsonObject))
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+	if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
 	{
-		for (TPair<FString, TSharedPtr<FJsonValue>>& JsonField : JsonObject->Values)
+		return;
+	}
+
+	for (const auto& JsonField : JsonObject->Values)
+	{
+		if (!JsonField.Value.IsValid())
 		{
-			const TSharedPtr<FJsonObject> MyJsonObject = JsonField.Value->AsObject();
-
-			FName SubjectName(*JsonField.Key);
-			const TArray<TSharedPtr<FJsonValue>>* properties;
-			const TSharedPtr<FJsonObject>* joints;
-
-			bool bCreateSubject = !EncounteredSubjects.Contains(SubjectName);
-
-
-			if (bCreateSubject)
-			{
-				FLiveLinkStaticDataStruct StaticDataStruct = FLiveLinkStaticDataStruct(FLiveLinkSkeletonStaticData::StaticStruct());
-				if (!StaticDataStruct.IsValid())
-					break;
-				FLiveLinkSkeletonStaticData& StaticData = *StaticDataStruct.Cast<FLiveLinkSkeletonStaticData>();
-
-				if (MyJsonObject->TryGetArrayField(TEXT("Properties"), properties) )
-				{
-					StaticData.PropertyNames.SetNumUninitialized(properties->Num());
-					for (int pnameIdx = 0; pnameIdx < properties->Num(); ++pnameIdx)
-					{
-						const TSharedPtr<FJsonValue>& pname = (*properties)[pnameIdx];
-						const TSharedPtr<FJsonObject> pnameObject = pname->AsObject();
-
-						FString propertyName;
-						if (pnameObject->TryGetStringField(TEXT("Name"), propertyName))
-						{
-							StaticData.PropertyNames[pnameIdx] = FName(*propertyName);
-						}
-					}
-				}
-
-				if (MyJsonObject->TryGetObjectField(TEXT("Joints"), joints))
-				{
-					const TArray<TSharedPtr<FJsonValue>> jointParents = joints->Get()->GetArrayField(TEXT("ParentIdx"));
-					const TArray<TSharedPtr<FJsonValue>> jointnames = joints->Get()->GetArrayField(TEXT("Names"));
-					StaticData.BoneNames.SetNumUninitialized(jointnames.Num());
-					StaticData.BoneParents.SetNumUninitialized(jointnames.Num());
-
-					for (int pnameIdx = 0; pnameIdx < jointnames.Num(); ++pnameIdx)
-					{
-
-						FString BoneName = jointnames[pnameIdx]->AsString();
-						StaticData.BoneNames[pnameIdx] = FName(*BoneName);
-						jointParents[pnameIdx].Get()->TryGetNumber(StaticData.BoneParents[pnameIdx]);
-					}
-
-				}
-
-				Client->PushSubjectStaticData_AnyThread({ SourceGuid, SubjectName }, ULiveLinkAnimationRole::StaticClass(), MoveTemp(StaticDataStruct));
-				EncounteredSubjects.Add(SubjectName);
-
-			}
-
-
-			FLiveLinkFrameDataStruct FrameDataStruct = FLiveLinkFrameDataStruct(FLiveLinkAnimationFrameData::StaticStruct());
-			FLiveLinkAnimationFrameData& FrameData = *FrameDataStruct.Cast<FLiveLinkAnimationFrameData>();
-
-			MyJsonObject->TryGetNumberField(TEXT("FrameId"), FrameData.FrameId);
-
-			FrameData.MetaData.SceneTime.Time.FrameNumber = FrameData.FrameId;
-
-			if (MyJsonObject->TryGetArrayField(TEXT("Properties"), properties))
-			{
-				FrameData.PropertyValues.SetNumUninitialized(properties->Num());
-				for (int pnameIdx = 0; pnameIdx < properties->Num(); ++pnameIdx)
-				{
-					const TSharedPtr<FJsonValue>& pname = (*properties)[pnameIdx];
-					const TSharedPtr<FJsonObject> pnameObject = pname->AsObject();
-
-					float value;
-					if (pnameObject->TryGetNumberField(TEXT("Value"), value))
-					{
-						FrameData.PropertyValues[pnameIdx] = value;
-					}
-				}
-
-			}
-
-			if (MyJsonObject->TryGetObjectField(TEXT("Joints"), joints))
-			{
-
-				const TArray<TSharedPtr<FJsonValue>> jointTransforms = joints->Get()->GetArrayField(TEXT("Transforms"));
-
-				FrameData.Transforms.SetNumUninitialized(jointTransforms.Num());
-				for (int pnameIdx = 0; pnameIdx < jointTransforms.Num(); ++pnameIdx)
-				{
-					auto boneTrans = jointTransforms[pnameIdx]->AsArray();
-					FTransform trans;
-					trans.SetIdentity();
-					trans.SetTranslation(FVector(boneTrans[0]->AsNumber(), boneTrans[1]->AsNumber(), boneTrans[2]->AsNumber()));
-					trans.SetRotation(FQuat(FRotator(boneTrans[3]->AsNumber(), boneTrans[4]->AsNumber(), boneTrans[5]->AsNumber())));
-					FrameData.Transforms[pnameIdx] = trans;
-				}
-
-			}
-
-			Client->PushSubjectFrameData_AnyThread({ SourceGuid, SubjectName }, MoveTemp(FrameDataStruct));
+			continue;
 		}
+
+		const TSharedPtr<FJsonObject> SubjectObject = JsonField.Value->AsObject();
+		const FName SubjectName(*JsonField.Key);
+		if (!SubjectObject.IsValid() || SubjectName.IsNone())
+		{
+			continue;
+		}
+
+		TArray<TPair<FName, float>> InputProperties;
+		const TArray<TSharedPtr<FJsonValue>>* JsonProperties = nullptr;
+		if (SubjectObject->TryGetArrayField(TEXT("Properties"), JsonProperties)
+			&& JsonProperties != nullptr)
+		{
+			InputProperties.Reserve(JsonProperties->Num());
+			for (const TSharedPtr<FJsonValue>& JsonProperty : *JsonProperties)
+			{
+				if (!JsonProperty.IsValid())
+				{
+					continue;
+				}
+
+				const TSharedPtr<FJsonObject> PropertyObject = JsonProperty->AsObject();
+				if (!PropertyObject.IsValid())
+				{
+					continue;
+				}
+
+				FString PropertyName;
+				float PropertyValue = 0.0f;
+				if (PropertyObject->TryGetStringField(TEXT("Name"), PropertyName)
+					&& PropertyObject->TryGetNumberField(TEXT("Value"), PropertyValue))
+				{
+					InputProperties.Emplace(FName(*PropertyName), PropertyValue);
+				}
+			}
+		}
+
+		TArray<FName> PropertyNames;
+		TArray<float> PropertyValues;
+		BuildMetaHumanPropertySet(InputProperties, PropertyNames, PropertyValues);
+
+		int32 FrameId = INDEX_NONE;
+		SubjectObject->TryGetNumberField(TEXT("FrameId"), FrameId);
+
+		int32* LastAcceptedFrameId = LastSubjectFrameIds.Find(SubjectName);
+		if (LastAcceptedFrameId == nullptr)
+		{
+			LastSubjectFrameIds.Add(SubjectName, INDEX_NONE);
+			LastAcceptedFrameId = LastSubjectFrameIds.Find(SubjectName);
+		}
+
+		if (LastAcceptedFrameId == nullptr
+			|| !ShouldAcceptSubjectFrame(FrameId, *LastAcceptedFrameId))
+		{
+			continue;
+		}
+
+		const TArray<FName>* ExistingPropertyNames = SubjectPropertyNames.Find(SubjectName);
+		if (ExistingPropertyNames == nullptr || *ExistingPropertyNames != PropertyNames)
+		{
+			FLiveLinkStaticDataStruct StaticDataStruct(FLiveLinkBaseStaticData::StaticStruct());
+			if (!StaticDataStruct.IsValid())
+			{
+				continue;
+			}
+
+			FLiveLinkBaseStaticData& StaticData =
+				*StaticDataStruct.Cast<FLiveLinkBaseStaticData>();
+			StaticData.PropertyNames = PropertyNames;
+
+			Client->PushSubjectStaticData_AnyThread(
+				{ SourceGuid, SubjectName },
+				ULiveLinkBasicRole::StaticClass(),
+				MoveTemp(StaticDataStruct));
+			SubjectPropertyNames.Add(SubjectName, PropertyNames);
+		}
+
+		FLiveLinkFrameDataStruct FrameDataStruct(FLiveLinkBaseFrameData::StaticStruct());
+		if (!FrameDataStruct.IsValid())
+		{
+			continue;
+		}
+
+		FLiveLinkBaseFrameData& FrameData = *FrameDataStruct.Cast<FLiveLinkBaseFrameData>();
+		FrameData.PropertyValues = PropertyValues;
+		FrameData.FrameId = FrameId;
+		FrameData.MetaData.SceneTime.Time.FrameNumber = FrameData.FrameId;
+
+		Client->PushSubjectFrameData_AnyThread(
+			{ SourceGuid, SubjectName },
+			MoveTemp(FrameDataStruct));
 	}
 }
 

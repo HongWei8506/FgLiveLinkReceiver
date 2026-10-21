@@ -6,11 +6,11 @@
 #include "ILiveLinkSource.h"
 #include "HAL/Runnable.h"
 #include "HAL/ThreadSafeBool.h"
-#include "IMessageContext.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
 
 class FRunnableThread;
 class FSocket;
+class FJSONDatagramReassembler;
 class ILiveLinkClient;
 class ISocketSubsystem;
 
@@ -46,7 +46,26 @@ public:
 
 	// End FRunnable Interface
 
-	void HandleReceivedData(TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> ReceivedData);
+	/**
+	 * Builds the ordered property set consumed by MetaHuman's Basic LiveLink role.
+	 * Existing names are preserved and explicit translateX/Y/Z names also receive
+	 * tx/ty/tz aliases. Required MetaHuman bookkeeping properties are appended only
+	 * when the source did not already provide them.
+	 */
+	static void BuildMetaHumanPropertySet(
+		const TArray<TPair<FName, float>>& InputProperties,
+		TArray<FName>& OutPropertyNames,
+		TArray<float>& OutPropertyValues);
+
+	/**
+	 * Accepts new and forward-skipped frame IDs while rejecting duplicates and
+	 * stale frames that arrive after a newer frame.
+	 */
+	static bool ShouldAcceptSubjectFrame(
+		int32 FrameId,
+		int32& InOutLastAcceptedFrameId);
+
+	void HandleReceivedData(const uint8* Data, int32 NumBytes);
 
 private:
 
@@ -54,8 +73,6 @@ private:
 
 	// Our identifier in LiveLink
 	FGuid SourceGuid;
-
-	FMessageAddress ConnectionAddress;
 
 	FText SourceType;
 	FText SourceMachineName;
@@ -81,8 +98,14 @@ private:
 	// Time to wait between attempted receives
 	FTimespan WaitTime;
 
-	// List of subjects we've already encountered
-	TSet<FName> EncounteredSubjects;
+	// Property layout currently published for each subject
+	TMap<FName, TArray<FName>> SubjectPropertyNames;
+
+	// Last accepted frame for each subject, used to suppress duplicate/stale frames
+	TMap<FName, int32> LastSubjectFrameIds;
+
+	// Reassembles application-level split or concatenated JSON payloads
+	TUniquePtr<FJSONDatagramReassembler> DatagramReassembler;
 
 	// Buffer to receive socket data into
 	TArray<uint8> RecvBuffer;
