@@ -10,12 +10,12 @@
 
 namespace
 {
-	TArray<uint8> ToUtf8Bytes(const ANSICHAR* Text)
+	TArray<uint8> ToUtf8Bytes(const TCHAR* Text)
 	{
+		const FTCHARToUTF8 Converter(Text);
 		TArray<uint8> Bytes;
-		const int32 Length = FCStringAnsi::Strlen(Text);
-		Bytes.SetNumUninitialized(Length);
-		FMemory::Memcpy(Bytes.GetData(), Text, Length);
+		Bytes.SetNumUninitialized(Converter.Length());
+		FMemory::Memcpy(Bytes.GetData(), Converter.Get(), Converter.Length());
 		return Bytes;
 	}
 
