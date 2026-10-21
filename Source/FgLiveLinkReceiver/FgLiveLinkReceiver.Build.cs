@@ -7,6 +7,7 @@ public class FgLiveLinkReceiver : ModuleRules
 	public FgLiveLinkReceiver(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+		// Includes the UDP JSON protocol helpers and per-subject frame-rate estimation.
 
 		PublicDependencyModuleNames.AddRange(
 			new string[]
